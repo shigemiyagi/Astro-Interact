@@ -1,5 +1,5 @@
 # main.py
-# Astro-Interact バックエンドAPI - 完成版
+# Astro-Interact バックエンドAPI - 最終修正版
 
 import datetime
 import logging
@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 import swisseph as swe
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from geopy.geocoders import Nominatim
 from pydantic import BaseModel, Field
 
@@ -31,6 +32,10 @@ HELIO_PLANET_IDS = {
     "Mars": swe.MARS, "Jupiter": swe.JUPITER, "Saturn": swe.SATURN,
     "Uranus": swe.URANUS, "Neptune": swe.NEPTUNE, "Pluto": swe.PLUTO,
     "Chiron": swe.CHIRON,
+}
+CHART_TYPE_ABBREVIATIONS = {
+    "natal": 'N', "progressed": 'P', "transit": 'T', 
+    "solarArc": 'SA', "solarReturn": 'SR', "heliocentric": 'H'
 }
 SIGNS = ["Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo", "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"]
 ASPECTS = {"Conjunction": 0, "Opposition": 180, "Trine": 120, "Square": 90, "Sextile": 60}
@@ -67,10 +72,23 @@ class HoroscopeResponse(BaseModel):
     solarArc: ChartData; solarReturn: ChartData; heliocentric: ChartData
     aspects: Dict[str, List[AspectData]]
 
-# --- 2. FastAPIアプリケーションの初期化 (変更なし) ---
+# --- 2. FastAPIアプリケーションの初期化 ---
 app = FastAPI(title="Astro-Interact API", version="1.0.0")
 
-# --- 3. ヘルパー関数 ---
+origins = [
+    "null", "http://localhost", "http://localhost:8080",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --- 3. ヘルパー関数 (変更なし) ---
 def get_lat_lon_from_location(location: str) -> (float, float):
     logging.info(f"ジオコーディング開始: {location}")
     try:
@@ -95,19 +113,24 @@ def get_julian_day(date_str: str, time_str: str = "12:00:00") -> float:
 def calculate_planets(jd: float, planet_ids: dict, flags: int) -> Dict[str, PlanetData]:
     planets = {}
     for name, p_id in planet_ids.items():
-        pos_data = swe.calc_ut(jd, p_id, flags)
-        longitude, speed = pos_data[0], pos_data[3]
+        pos_data, ret_code = swe.calc_ut(jd, p_id, flags)
+        
+        longitude = pos_data[0]
+        is_retro = False
+        if len(pos_data) > 3:
+            is_retro = pos_data[3] < 0
+            
         planets[name] = PlanetData(
             sign=SIGNS[int(longitude / 30)],
             degree=longitude % 30,
-            isRetro=speed < 0,
+            isRetro=is_retro,
             position=longitude,
         )
     return planets
 
 def calculate_houses(jd: float, lat: float, lon: float) -> (List[float], float):
-    house_cusps, ascmc = swe.houses(jd, lat, lon, b'P')
-    return house_cusps.tolist(), ascmc[0]
+    house_cusps_tuple, ascmc_tuple = swe.houses(jd, lat, lon, b'P')
+    return list(house_cusps_tuple), ascmc_tuple[0]
 
 def assign_houses_to_planets(planets: Dict[str, PlanetData], house_cusps: List[float]):
     for planet in planets.values():
@@ -120,7 +143,7 @@ def assign_houses_to_planets(planets: Dict[str, PlanetData], house_cusps: List[f
                 break
     return planets
 
-def calculate_aspects(chart1: ChartData, chart2: ChartData, chart1_name: str, chart2_name: str) -> List[AspectData]:
+def calculate_aspects(chart1: ChartData, chart2: ChartData) -> List[AspectData]:
     aspect_list = []
     planets1, planets2 = chart1.planets, chart2.planets
     p1_keys, p2_keys = list(planets1.keys()), list(planets2.keys())
@@ -152,7 +175,6 @@ def calculate_all_charts(request: HoroscopeRequest) -> HoroscopeResponse:
     flags = swe.FLG_SWIEPH | swe.FLG_SPEED
     charts = {}
 
-    # --- 1. ネイタルチャート ---
     natal_info = request.natal
     lat, lon = get_lat_lon_from_location(natal_info.location)
     jd_natal = get_julian_day(natal_info.date, natal_info.time)
@@ -161,18 +183,15 @@ def calculate_all_charts(request: HoroscopeRequest) -> HoroscopeResponse:
     natal_planets = assign_houses_to_planets(natal_planets, natal_houses)
     charts["natal"] = ChartData(planets=natal_planets, houses=natal_houses)
 
-    # --- 2. トランジット ---
     jd_transit = get_julian_day(request.events.transit.date)
     charts["transit"] = ChartData(planets=calculate_planets(jd_transit, PLANET_IDS, flags))
 
-    # --- 3. プログレス (Secondary Progression) ---
     natal_dt = datetime.datetime.strptime(f"{natal_info.date} {natal_info.time}", "%Y-%m-%d %H:%M:%S")
     prog_dt = datetime.datetime.strptime(request.events.progressed.date, "%Y-%m-%d")
     days_after_birth = (prog_dt - natal_dt.replace(hour=0, minute=0, second=0)).days
     jd_progressed = jd_natal + days_after_birth
     charts["progressed"] = ChartData(planets=calculate_planets(jd_progressed, PLANET_IDS, flags))
 
-    # --- 4. ソーラーアーク ---
     solar_arc = (charts["progressed"].planets["Sun"].position - charts["natal"].planets["Sun"].position) % 360
     sa_planets = {}
     for name, p_data in natal_planets.items():
@@ -183,43 +202,41 @@ def calculate_all_charts(request: HoroscopeRequest) -> HoroscopeResponse:
         )
     charts["solarArc"] = ChartData(planets=sa_planets, houses=natal_houses)
 
-    # --- 5. ソーラーリターン ---
     sr_info = request.events.solarReturn
     sr_lat, sr_lon = get_lat_lon_from_location(sr_info.location)
-    # swe.solret_ut()でソーラーリターンの正確な日時(JD)を計算
-    err, jd_solret, serr = swe.solret_ut(jd_natal, sr_info.year)
-    sr_planets = calculate_planets(jd_solret, PLANET_IDS, flags)
-    sr_houses, sr_asc = calculate_houses(jd_solret, sr_lat, sr_lon)
-    sr_planets = assign_houses_to_planets(sr_planets, sr_houses)
+    
+    # ★★★ 修正箇所 ★★★
+    # 正しいライブラリ(pyswisseph)の正しい関数名 `swe.solret_ut` を使用
+    ret_code, jd_solret, serr = swe.solret_ut(jd_natal, sr_info.year)
+    if ret_code != 0:
+        logging.error(f"ソーラーリターン計算失敗: {serr}")
+        sr_planets, sr_houses = {}, []
+    else:
+        sr_planets = calculate_planets(jd_solret, PLANET_IDS, flags)
+        sr_houses, sr_asc = calculate_houses(jd_solret, sr_lat, sr_lon)
+        sr_planets = assign_houses_to_planets(sr_planets, sr_houses)
     charts["solarReturn"] = ChartData(planets=sr_planets, houses=sr_houses)
 
-    # --- 6. ヘリオセントリック ---
     jd_helio = get_julian_day(request.events.heliocentric.date)
     helio_flags = flags | swe.FLG_HELCTR
     charts["heliocentric"] = ChartData(planets=calculate_planets(jd_helio, HELIO_PLANET_IDS, helio_flags))
 
-    # --- 7. アスペクト計算 ---
     logging.info("アスペクト計算を開始...")
     aspects = {}
     chart_names = list(charts.keys())
     for i in range(len(chart_names)):
         for j in range(i, len(chart_names)):
             c1_name, c2_name = chart_names[i], chart_names[j]
-            # ヘリオとジオの混合アスペクトは計算しないルール（例）
             if ('helio' in c1_name and 'helio' not in c2_name) or \
                ('helio' not in c1_name and 'helio' in c2_name):
                 continue
             
-            key = f"{c1_name[0].upper()}-{c2_name[0].upper()}"
-            aspects[key] = calculate_aspects(charts[c1_name], charts[c2_name], c1_name, c2_name)
+            key = f"{CHART_TYPE_ABBREVIATIONS[c1_name]}-{CHART_TYPE_ABBREVIATIONS[c2_name]}"
+            aspects[key] = calculate_aspects(charts[c1_name], charts[c2_name])
 
     response = HoroscopeResponse(
-        natal=charts["natal"],
-        progressed=charts["progressed"],
-        transit=charts["transit"],
-        solarArc=charts["solarArc"],
-        solarReturn=charts["solarReturn"],
-        heliocentric=charts["heliocentric"],
+        natal=charts["natal"], progressed=charts["progressed"], transit=charts["transit"],
+        solarArc=charts["solarArc"], solarReturn=charts["solarReturn"], heliocentric=charts["heliocentric"],
         aspects=aspects
     )
     logging.info("ホロスコープ計算処理が正常に完了。")
