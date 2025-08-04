@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Astro-Interact</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #111827; /* gray-900 */
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+        // --- 定数定義 ---
+        const PLANET_GLYPHS = {
+          Sun: "☉", Moon: "☽", Earth: "♁", Mercury: "☿", Venus: "♀", Mars: "♂", Jupiter: "♃", Saturn: "♄",
+          Uranus: "♅", Neptune: "♆", Pluto: "♇", "Mean North Node": "☊", "Mean South Node": "☋",
+          "Mean Black Moon Lilith": "⚸", Chiron: "⚷"
+        };
+        const PLANET_NAMES_JP = {
+            Sun: "太陽", Moon: "月", Earth: "地球", Mercury: "水星", Venus: "金星", Mars: "火星", Jupiter: "木星", Saturn: "土星",
+            Uranus: "天王星", Neptune: "海王星", Pluto: "冥王星", "Mean North Node": "ドラゴンヘッド", "Mean South Node": "ドラゴンテイル",
+            "Mean Black Moon Lilith": "リリス", Chiron: "キロン"
+        };
+        const CHART_TYPE_COLORS = { natal: "#FFD700", progressed: "#FFA500", transit: "#68D391", solarArc: "#87CEEB", solarReturn: "#FF6347", heliocentric: "#DA70D6" };
+        const CHART_TYPE_ABBREVIATIONS = { natal: 'N', progressed: 'P', transit: 'T', solarArc: 'SA', solarReturn: 'SR', heliocentric: 'H' };
+        const SIGN_GLYPHS = { Aries: "♈", Taurus: "♉", Gemini: "♊", Cancer: "♋", Leo: "♌", Virgo: "♍", Libra: "♎", Scorpio: "♏", Sagittarius: "♐", Capricorn: "♑", Aquarius: "♒", Pisces: "♓" };
+        const ASPECT_GLYPHS = { Conjunction: "☌", Opposition: "☍", Trine: "△", Square: "□", Sextile: "⚹" };
+        const CHART_TYPE_ORDER = ["natal", "progressed", "transit", "solarArc", "solarReturn", "heliocentric"];
+        const API_URL = "http://127.0.0.1:8000/horoscope"; // バックエンドAPIのURL
+
+        // --- ヘルパー関数 ---
+        const decimalToDMS = (decimal) => {
+            if (typeof decimal !== 'number') return '';
+            const deg = Math.floor(decimal);
+            const min = Math.floor((decimal - deg) * 60);
+            return `${String(deg).padStart(2, '0')}°${String(min).padStart(2, '0')}'`;
+        };
+
+        // --- Reactコンポーネント ---
+
+        const HoroscopeChart = ({ data, chartTypes }) => {
+            const size = 600;
+            const center = size / 2;
+            const ringStep = 35;
+            const houseRadius = center - 20;
+            const zodiacRadius = houseRadius - 25;
+            
+            if (!data || !data.natal) return <div className="flex items-center justify-center h-full text-gray-400">Enter data and generate chart.</div>;
+
+            const sortedChartTypes = chartTypes.slice().sort((a, b) => CHART_TYPE_ORDER.indexOf(a) - CHART_TYPE_ORDER.indexOf(b));
+            const innermostRadius = zodiacRadius - 20 - ((sortedChartTypes.length - 1) * ringStep);
+            const planetRadii = sortedChartTypes.map((_, i) => innermostRadius + (i * ringStep));
+            const ascendantAngle = data.natal.houses ? data.natal.houses[0] : 0;
+            const showHouses = !chartTypes.includes('heliocentric');
+
+            const getCoords = (angle, radius) => {
+                const rotatedAngle = (angle - (showHouses ? ascendantAngle : 0) + 180) % 360;
+                const rad = (rotatedAngle * Math.PI) / 180;
+                return { x: center + radius * Math.cos(rad), y: center + radius * Math.sin(rad) };
+            };
+
+            return (
+                <svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
+                    <defs><radialGradient id="grad-bg"><stop offset="70%" stopColor="#1a202c" /><stop offset="100%" stopColor="#2d3748" /></radialGradient></defs>
+                    <circle cx={center} cy={center} r={size/2} fill="url(#grad-bg)" />
+                    <g>
+                        {[...Array(12)].map((_, i) => {
+                            const angle1 = i * 30;
+                            const textPos = getCoords(angle1 + 15, houseRadius - 12);
+                            return (<g key={`sign-${i}`}><line x1={getCoords(angle1, houseRadius).x} y1={getCoords(angle1, houseRadius).y} x2={getCoords(angle1, zodiacRadius).x} y2={getCoords(angle1, zodiacRadius).y} stroke="#4a5568" strokeWidth="1" /><text x={textPos.x} y={textPos.y} fill="#a0aec0" fontSize="20" textAnchor="middle" alignmentBaseline="middle">{SIGN_GLYPHS[Object.keys(SIGN_GLYPHS)[i]]}</text></g>);
+                        })}
+                        <circle cx={center} cy={center} r={houseRadius} fill="none" stroke="#4a5568" strokeWidth="1.5" /><circle cx={center} cy={center} r={zodiacRadius} fill="none" stroke="#4a5568" strokeWidth="0.5" />
+                    </g>
+                    {showHouses && data.natal.houses && <g>
+                        {data.natal.houses.map((cusp, i) => {
+                            const textPos = getCoords((cusp + data.natal.houses[(i + 1) % 12]) / 2, innermostRadius > 20 ? innermostRadius - 20 : 20 );
+                            const isMajor = [0, 3, 6, 9].includes(i);
+                            return (<g key={`house-${i}`}><line x1={center} y1={center} x2={getCoords(cusp, zodiacRadius).x} y2={getCoords(cusp, zodiacRadius).y} stroke="#63b3ed" strokeWidth={isMajor ? 1.5 : 0.5} strokeDasharray={isMajor ? "none" : "4 2"} opacity="0.8" /><text x={textPos.x} y={textPos.y} fill="#90cdf4" fontSize="12" textAnchor="middle" alignmentBaseline="middle" opacity="0.7">{i + 1}</text></g>);
+                        })}
+                        <text x={getCoords(ascendantAngle, houseRadius + 10).x} y={getCoords(ascendantAngle, houseRadius + 10).y} fill="#fff" fontSize="10" textAnchor="middle">ASC</text>
+                        <text x={getCoords(data.natal.houses[9], houseRadius + 10).x} y={getCoords(data.natal.houses[9], houseRadius + 10).y} fill="#fff" fontSize="10" textAnchor="middle">MC</text>
+                    </g>}
+                    {sortedChartTypes.map((type, chartIndex) => {
+                        if (!data[type] || !data[type].planets) return null;
+                        const radius = planetRadii[chartIndex];
+                        if (radius <= 0) return null;
+                        return (
+                            <g key={`ring-${type}`}>
+                                <circle cx={center} cy={center} r={radius} fill="none" stroke={CHART_TYPE_COLORS[type]} strokeWidth="0.5" opacity="0.5" />
+                                {Object.entries(data[type].planets).map(([name, planet]) => {
+                                    const { x, y } = getCoords(planet.position, radius);
+                                    return (<g key={`${type}-${name}`}><text x={x} y={y} fill={CHART_TYPE_COLORS[type]} fontSize="16" textAnchor="middle" alignmentBaseline="middle" style={{paintOrder: "stroke", stroke: "#1a202c", strokeWidth: "3px"}}>{PLANET_GLYPHS[name]}</text><text x={x} y={y + 12} fill={CHART_TYPE_COLORS[type]} fontSize="8" textAnchor="middle" alignmentBaseline="middle">{planet.isRetro ? "R" : ""}</text></g>);
+                                })}
+                            </g>
+                        );
+                    })}
+                </svg>
+            );
+        };
+
+        const InputPanel = ({ events, setEvents, onFetch, isLoading }) => {
+            const handleNatalChange = (field, value) => setEvents(prev => ({ ...prev, natal: { ...prev.natal, [field]: value } }));
+            const handleEventChange = (type, field, value) => setEvents(prev => ({ ...prev, [type]: { ...prev[type], [field]: value } }));
+            return (
+                <form onSubmit={(e) => { e.preventDefault(); onFetch(); }} className="space-y-4">
+                    <div>
+                        <h3 className="text-lg font-semibold text-white mb-2">Natal Info</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                            <input type="date" value={events.natal.date} onChange={e => handleNatalChange('date', e.target.value)} className="bg-gray-700 text-white p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                            <input type="time" value={events.natal.time} onChange={e => handleNatalChange('time', e.target.value)} className="bg-gray-700 text-white p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                            <input type="text" placeholder="City, Country" value={events.natal.location} onChange={e => handleNatalChange('location', e.target.value)} className="bg-gray-700 text-white p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                    </div>
+                    <div>
+                        <h3 className="text-lg font-semibold text-white mb-2">Event Dates</h3>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-left text-gray-300">
+                                <thead className="text-xs text-gray-400 uppercase bg-gray-700"><tr><th className="px-2 py-2">Type</th><th className="px-2 py-2">Date / Year</th><th className="px-2 py-2">Location</th></tr></thead>
+                                <tbody>
+                                    {CHART_TYPE_ORDER.filter(k => k !== 'natal').map(type => (
+                                        <tr key={type} className="border-b border-gray-700">
+                                            <td className="px-2 py-1 capitalize" style={{color: CHART_TYPE_COLORS[type]}}>{CHART_TYPE_ABBREVIATIONS[type]}</td>
+                                            <td className="px-2 py-1"><input type={type === 'solarReturn' ? 'number' : 'date'} value={events[type].date} onChange={e => handleEventChange(type, 'date', e.target.value)} className="bg-gray-600 w-full text-white p-1 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500" /></td>
+                                            <td className="px-2 py-1"><input type="text" value={events[type].location} onChange={e => handleEventChange(type, 'location', e.target.value)} className="bg-gray-600 w-full text-white p-1 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500" /></td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <button type="submit" disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition duration-300 disabled:bg-gray-500">{isLoading ? 'Calculating...' : 'Generate Chart'}</button>
+                </form>
+            );
+        };
+
+        const TimeControl = ({ date, setDate, initialDate }) => {
+            const adjustDate = (amount, unit) => {
+                const newDate = new Date(date);
+                if (unit === 'day') newDate.setDate(newDate.getDate() + amount);
+                if (unit === 'month') newDate.setMonth(newDate.getMonth() + amount);
+                if (unit === 'year') newDate.setFullYear(newDate.getFullYear() + amount);
+                setDate(newDate.toISOString().split('T')[0]);
+            };
+            return (
+                <div className="flex justify-center items-center space-x-1 sm:space-x-2 p-2 bg-gray-900 rounded-md">
+                    <button onClick={() => adjustDate(-1, 'year')} className="px-2 py-1 bg-gray-700 rounded-md hover:bg-gray-600">-1Y</button>
+                    <button onClick={() => adjustDate(-1, 'month')} className="px-2 py-1 bg-gray-700 rounded-md hover:bg-gray-600">-1M</button>
+                    <button onClick={() => adjustDate(-1, 'day')} className="px-2 py-1 bg-gray-700 rounded-md hover:bg-gray-600">-1D</button>
+                    <span className="text-white font-mono text-sm sm:text-base">{date}</span>
+                    <button onClick={() => adjustDate(1, 'day')} className="px-2 py-1 bg-gray-700 rounded-md hover:bg-gray-600">+1D</button>
+                    <button onClick={() => adjustDate(1, 'month')} className="px-2 py-1 bg-gray-700 rounded-md hover:bg-gray-600">+1M</button>
+                    <button onClick={() => adjustDate(1, 'year')} className="px-2 py-1 bg-gray-700 rounded-md hover:bg-gray-600">+1Y</button>
+                    <button onClick={() => setDate(initialDate)} className="px-2 py-1 bg-indigo-700 rounded-md hover:bg-indigo-600">Reset</button>
+                </div>
+            );
+        };
+
+        const ChartSelection = ({ selectedTypes, setSelectedTypes }) => {
+            const handleSelect = (type) => {
+                if (type === 'heliocentric') {
+                    setSelectedTypes(selectedTypes.includes('heliocentric') ? ['natal'] : ['heliocentric']);
+                } else {
+                    let newSelection = selectedTypes.filter(t => t !== 'heliocentric');
+                    if (newSelection.includes(type)) {
+                        if (newSelection.length > 1) newSelection = newSelection.filter(t => t !== type);
+                    } else {
+                        newSelection.push(type);
+                    }
+                    if (newSelection.length > 5) { alert("You can select up to 5 geocentric chart types."); return; }
+                    setSelectedTypes(newSelection);
+                }
+            };
+            return (
+                <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">Chart Display</h3>
+                    <div className="flex flex-wrap gap-x-4 gap-y-2">
+                        {CHART_TYPE_ORDER.map(type => (
+                            <label key={type} className="flex items-center space-x-2 cursor-pointer">
+                                <input type="checkbox" checked={selectedTypes.includes(type)} onChange={() => handleSelect(type)} className="form-checkbox h-5 w-5 rounded" style={{accentColor: CHART_TYPE_COLORS[type]}} />
+                                <span className="capitalize" style={{color: CHART_TYPE_COLORS[type]}}>{type}</span>
+                            </label>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        const PlanetDataTable = ({ data, chartTypes }) => {
+            const [activeTab, setActiveTab] = useState('natal');
+            if (!data) return null;
+            const planets = data[activeTab]?.planets;
+            const sortedTabs = chartTypes.slice().sort((a,b) => CHART_TYPE_ORDER.indexOf(a) - CHART_TYPE_ORDER.indexOf(b));
+
+            useEffect(() => {
+                if (!sortedTabs.includes(activeTab)) { setActiveTab(sortedTabs.length > 0 ? sortedTabs[0] : 'natal'); }
+            }, [sortedTabs, activeTab]);
+
+            return (
+                <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">天体位置データ</h3>
+                    <div className="flex border-b border-gray-700 mb-2">
+                        {sortedTabs.map(type => (
+                            <button key={type} onClick={() => setActiveTab(type)} className={`capitalize px-4 py-2 text-sm font-medium transition-colors duration-200 ${activeTab === type ? 'border-b-2 border-blue-500 text-white' : 'text-gray-400 hover:text-white'}`}>
+                                {CHART_TYPE_ABBREVIATIONS[type]}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="overflow-auto max-h-60">
+                        <table className="w-full text-sm text-left text-gray-300">
+                            <thead className="text-xs text-gray-400 uppercase bg-gray-700 sticky top-0">
+                                <tr><th className="px-2 py-2">天体/感受点</th><th className="px-2 py-2">サイン</th><th className="px-2 py-2">度数</th><th className="px-2 py-2">逆行</th><th className="px-2 py-2">ハウス</th></tr>
+                            </thead>
+                            <tbody className="bg-gray-800">
+                                {planets && Object.entries(planets).map(([name, p]) => (
+                                    <tr key={name} className="border-b border-gray-700 hover:bg-gray-600">
+                                        <td className="px-2 py-1 whitespace-nowrap">{PLANET_GLYPHS[name]} {PLANET_NAMES_JP[name]}</td>
+                                        <td className="px-2 py-1">{SIGN_GLYPHS[p.sign]} {p.sign}</td>
+                                        <td className="px-2 py-1">{decimalToDMS(p.degree)}</td>
+                                        <td className="px-2 py-1">{p.isRetro ? 'R' : ''}</td>
+                                        <td className="px-2 py-1">{p.house || ''}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const AspectList = ({ aspects }) => {
+            const [selectedAspect, setSelectedAspect] = useState('N-T');
+            const aspectOptions = useMemo(() => CHART_TYPE_ORDER.flatMap((t1, i) => CHART_TYPE_ORDER.slice(i).map(t2 => ({ key: `${CHART_TYPE_ABBREVIATIONS[t1]}-${CHART_TYPE_ABBREVIATIONS[t2]}`, label: `${t1} - ${t2}` }))), []);
+            if (!aspects) return null;
+            const aspectData = aspects[selectedAspect.replace('-','')] || [];
+
+            return (
+                <div>
+                    <div className="flex justify-between items-center mb-2">
+                        <h3 className="text-lg font-semibold text-white">アスペクト</h3>
+                        <select value={selectedAspect} onChange={e => setSelectedAspect(e.target.value)} className="bg-gray-700 text-white p-1 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+                            {aspectOptions.map(opt => (<option key={opt.key} value={opt.key}>{opt.label}</option>))}
+                        </select>
+                    </div>
+                    <div className="overflow-auto max-h-48">
+                        <table className="w-full text-sm text-left text-gray-300">
+                            <thead className="text-xs text-gray-400 uppercase bg-gray-700 sticky top-0">
+                                <tr><th className="px-2 py-2">Planet 1</th><th className="px-2 py-2">Aspect</th><th className="px-2 py-2">Planet 2</th><th className="px-2 py-2">Orb</th></tr>
+                            </thead>
+                            <tbody className="bg-gray-800">
+                                {aspectData.map((asp, i) => (
+                                    <tr key={i} className="border-b border-gray-700 hover:bg-gray-600">
+                                        <td className="px-2 py-1">{PLANET_GLYPHS[asp.p1]} {asp.p1Sign}</td>
+                                        <td className="px-2 py-1">{ASPECT_GLYPHS[asp.aspect]} {asp.aspect}</td>
+                                        <td className="px-2 py-1">{PLANET_GLYPHS[asp.p2]} {asp.p2Sign}</td>
+                                        <td className="px-2 py-1">{asp.orb.toFixed(1)}° {asp.state.slice(0,1)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const ExportControls = ({ chartRef, data }) => {
+            const copyDataToClipboard = () => {
+                if (!data) return;
+                let markdownText = "";
+                CHART_TYPE_ORDER.forEach(type => {
+                    if (data[type] && data[type].planets) {
+                        markdownText += `### 天体位置 (${type})\n\n`;
+                        markdownText += "| 天体 | サイン | 度数 | 逆行 | ハウス |\n|:---|:---|:---:|:---:|:---:|\n";
+                        Object.entries(data[type].planets).forEach(([name, p]) => {
+                            markdownText += `| ${PLANET_GLYPHS[name]} ${name} | ${p.sign} | ${decimalToDMS(p.degree)} | ${p.isRetro ? 'R' : ''} | ${p.house || ''} |\n`;
+                        });
+                        markdownText += "\n";
+                    }
+                });
+                navigator.clipboard.writeText(markdownText).then(() => alert('Chart data copied!')).catch(err => console.error('Copy failed', err));
+            };
+            
+            const saveChartAsImage = () => {
+                const svgElement = chartRef.current?.querySelector('svg');
+                if (!svgElement) return;
+                const svgData = new XMLSerializer().serializeToString(svgElement);
+                const canvas = document.createElement('canvas');
+                const svgSize = svgElement.getBoundingClientRect();
+                canvas.width = svgSize.width; canvas.height = svgSize.height;
+                const ctx = canvas.getContext('2d');
+                const img = document.createElement('img');
+                img.setAttribute('src', 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData))));
+                img.onload = () => {
+                    ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0);
+                    const link = document.createElement('a');
+                    link.download = 'horoscope-chart.png'; link.href = canvas.toDataURL('image/png');
+                    link.click();
+                };
+            };
+
+            return (
+                <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">Export</h3>
+                    <div className="flex space-x-2">
+                        <button onClick={saveChartAsImage} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-md transition duration-300">Save as Image</button>
+                        <button onClick={copyDataToClipboard} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-md transition duration-300">Copy Data</button>
+                    </div>
+                </div>
+            );
+        };
+
+        // メインアプリケーションコンポーネント
+        function App() {
+            const today = new Date().toISOString().split('T')[0];
+            const [horoscopeData, setHoroscopeData] = useState(null);
+            const [isLoading, setIsLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [chartTypes, setChartTypes] = useState(['natal', 'transit']);
+            const [events, setEvents] = useState({
+                natal: { date: '1990-04-15', time: '12:30:00', location: 'Tokyo, Japan' },
+                progressed: { date: today, location: 'Tokyo, Japan' },
+                transit: { date: today, location: 'Tokyo, Japan' },
+                solarArc: { date: today, location: 'Tokyo, Japan' },
+                solarReturn: { date: new Date().getFullYear().toString(), location: 'Tokyo, Japan' },
+                heliocentric: { date: today, location: 'Tokyo, Japan' },
+            });
+            const chartContainerRef = useRef(null);
+
+            const fetchHoroscopeData = useCallback(async () => {
+                setIsLoading(true);
+                setError(null);
+                
+                const requestBody = {
+                    natal: events.natal,
+                    events: {
+                        progressed: { date: events.progressed.date },
+                        transit: { date: events.transit.date },
+                        solarArc: { date: events.solarArc.date },
+                        heliocentric: { date: events.heliocentric.date },
+                        solarReturn: { 
+                            year: parseInt(events.solarReturn.date, 10), 
+                            location: events.solarReturn.location 
+                        },
+                    }
+                };
+
+                try {
+                    const response = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    });
+                    if (!response.ok) {
+                        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                    }
+                    const data = await response.json();
+                    setHoroscopeData(data);
+                } catch (err) {
+                    console.error("Failed to fetch horoscope data:", err);
+                    setError("Failed to calculate chart. Please check the backend server and input data.");
+                    setHoroscopeData(null); // Clear previous data on error
+                } finally {
+                    setIsLoading(false);
+                }
+            }, [events]);
+
+            const handleTimeChange = (newDate) => {
+                setEvents(prev => ({
+                    ...prev,
+                    transit: {...prev.transit, date: newDate},
+                    progressed: {...prev.progressed, date: newDate},
+                    solarArc: {...prev.solarArc, date: newDate},
+                    heliocentric: {...prev.heliocentric, date: newDate},
+                }));
+            };
+            
+            // Time change should trigger a refetch
+            useEffect(() => {
+                if(horoscopeData) { // Only refetch if there is initial data
+                    fetchHoroscopeData();
+                }
+            }, [events.transit.date]); // Dependency on the date that time control changes
+
+            return (
+                <div className="bg-gray-900 text-gray-200 min-h-screen font-sans">
+                    <div className="container mx-auto p-4">
+                        <header className="text-center mb-6">
+                            <h1 className="text-4xl font-bold">Astro-Interact</h1>
+                            <p className="text-blue-300">Interactive Horoscope Generator</p>
+                        </header>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            <div className="lg:col-span-1 bg-gray-800 p-4 rounded-lg shadow-lg flex flex-col max-h-[90vh]">
+                                <div className="overflow-y-auto space-y-6 pr-2">
+                                    <InputPanel events={events} setEvents={setEvents} onFetch={fetchHoroscopeData} isLoading={isLoading} />
+                                    <hr className="border-gray-700"/>
+                                    <ChartSelection selectedTypes={chartTypes} setSelectedTypes={setChartTypes} />
+                                    <hr className="border-gray-700"/>
+                                    <PlanetDataTable data={horoscopeData} chartTypes={chartTypes} />
+                                    <hr className="border-gray-700"/>
+                                    <AspectList aspects={horoscopeData?.aspects} />
+                                     <hr className="border-gray-700"/>
+                                    <ExportControls chartRef={chartContainerRef} data={horoscopeData} />
+                                </div>
+                            </div>
+
+                            <div className="lg:col-span-2 bg-gray-800 p-4 rounded-lg shadow-lg flex flex-col items-center justify-center">
+                                <div ref={chartContainerRef} className="w-full max-w-2xl aspect-square">
+                                    {isLoading ? (
+                                        <div className="flex justify-center items-center h-full"><div className="animate-spin rounded-full h-32 w-32 border-t-2 border-b-2 border-blue-500"></div></div>
+                                    ) : error ? (
+                                        <div className="flex items-center justify-center h-full text-red-400 text-center p-4">{error}</div>
+                                    ) : (
+                                        <HoroscopeChart data={horoscopeData} chartTypes={chartTypes} />
+                                    )}
+                                </div>
+                                <div className="mt-4 w-full max-w-2xl">
+                                   <TimeControl date={events.transit.date} setDate={handleTimeChange} initialDate={today} />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
